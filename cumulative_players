@@ -1,0 +1,114 @@
+CREATE TYPE scoring_class AS ENUM ('star', 'good', 'average', 'bad');
+
+CREATE TYPE season_stats AS
+(
+	gp real,
+	pts real,
+	reb real,
+	ast real
+);
+
+CREATE TABLE players (
+	player_name TEXT,
+	age integer,
+	height text,
+	weight integer,
+	college text,
+	country text,
+	draft_year text,
+	season_stats season_stats[],
+	is_active boolean,
+	scoring_class scoring_class,
+	current_season integer,
+	PRIMARY KEY (player_name, current_season)
+);
+
+CREATE OR REPLACE PROCEDURE roll_forward_players(
+    start_season INT,
+    end_season   INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    yr INT;
+BEGIN
+    FOR yr IN start_season..end_season LOOP
+	
+	WITH today AS (
+	SELECT 
+		player_name,
+		age,
+		height,
+		weight,
+		college,
+		country,
+		draft_year,
+		gp,
+		pts,
+		reb,
+		ast,
+		season
+	FROM
+		player_seasons
+	WHERE 
+		season = yr
+	),
+	yesterday AS (
+	SELECT 
+		player_name,
+		age,
+		height,
+		weight,
+		college,
+		country,
+		draft_year,
+		season_stats,
+		scoring_class,
+		is_active,
+		current_season
+	FROM
+		players
+	WHERE 
+		current_season = yr - 1
+	)
+	INSERT INTO players(
+		SELECT 
+			COALESCE(y.player_name, t.player_name),
+			COALESCE(y.age, t.age),
+			COALESCE(y.height, t.height),
+			COALESCE(y.weight, t.weight),
+			COALESCE(y.college, t.college),
+			COALESCE(y.country, t.country),
+			COALESCE(y.draft_year, t.draft_year),
+			CASE WHEN y.season_stats IS NULL
+				 	THEN (ARRAY[ROW(t.gp, t.pts, t.reb, t.ast) :: season_stats])
+				 WHEN t.season IS NOT NULL
+				 	THEN y.season_stats || ARRAY[ROW(t.gp, t.pts, t.reb, t.ast) :: season_stats]
+				 ELSE y.season_stats END AS season_stats,
+			CASE WHEN t.season IS NULL
+				 	THEN False
+					ELSE True
+				 END AS is_active,
+			CASE WHEN t.pts IS NOT NULL THEN
+				(CASE WHEN t.pts > 20 THEN 'star'
+				 	  WHEN t.pts > 15 THEN 'good'
+					  WHEN t.pts > 10 THEN 'average'
+					  ELSE 'bad' END
+				) :: scoring_class
+				 ELSE y.scoring_class END AS scoring_class,
+			CASE WHEN t.season IS NOT NULL THEN
+				t.season
+				 ELSE y.current_season + 1 END AS current_season
+		FROM
+			yesterday y
+		FULL OUTER JOIN 
+			today t
+		ON
+			y.player_name = t.player_name);
+END LOOP;
+END;
+$$;
+
+CALL roll_forward_players(2003, 2022)
+		
+SELECT * FROM players ORDER BY player_name

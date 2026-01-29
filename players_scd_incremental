@@ -1,0 +1,161 @@
+CREATE TYPE scd_columns AS (
+is_active boolean,
+scoring_class scoring_class,
+start_season integer,
+end_season integer
+)
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS temp_table
+(
+    player_name text COLLATE pg_catalog."default",
+    age integer,
+    height text COLLATE pg_catalog."default",
+    weight integer,
+    college text COLLATE pg_catalog."default",
+    country text COLLATE pg_catalog."default",
+    draft_year text COLLATE pg_catalog."default",
+    season_stats season_stats[],
+    is_active boolean,
+    scoring_class scoring_class,
+    start_season integer,
+    end_season integer
+);
+
+INSERT INTO temp_table(
+	WITH this_season AS (
+		SELECT * FROM players
+		WHERE current_season = 2022
+	),
+	historical_data AS (
+		SELECT * FROM players_scd
+		WHERE end_season < 2021
+	),
+	last_season AS (
+		SELECT * FROM players_scd
+		WHERE end_season = 2021
+	),
+	new_records AS (
+	SELECT 
+		ts.player_name,
+		ts.age,
+		ts.height,
+		ts.weight,
+		ts.college,
+		ts.country,
+		ts.draft_year,
+		ts.season_stats,
+		ts.is_active,
+		ts.scoring_class,
+		ts.current_season AS start_season,
+		ts.current_season AS end_season
+	FROM
+		last_season ls
+	RIGHT JOIN
+		this_season ts
+	ON
+		ls.player_name = ts.player_name
+	WHERE
+		ls.player_name IS NULL
+	),
+	unchanged_records AS (
+	SELECT 
+		ts.player_name,
+		ts.age,
+		ts.height,
+		ts.weight,
+		ts.college,
+		ts.country,
+		ts.draft_year,
+		ts.season_stats,
+		ts.is_active,
+		ts.scoring_class,
+		ls.start_season AS start_season,
+		ts.current_season AS end_season
+	FROM
+		last_season ls
+	JOIN
+		this_season ts
+	ON
+		ls.player_name = ts.player_name
+	WHERE
+		ls.is_active = ts.is_active
+		AND
+		ls.scoring_class = ts.scoring_class
+	),
+	changed_records AS (
+	SELECT 
+		ts.player_name,
+		ts.age,
+		ts.height,
+		ts.weight,
+		ts.college,
+		ts.country,
+		ts.draft_year,
+		ts.season_stats,
+		UNNEST(ARRAY[ROW(
+			ls.is_active,
+			ls.scoring_class,
+			ls.start_season,
+			ls.end_season
+		) :: scd_columns,
+			  ROW(
+			ts.is_active,
+			ts.scoring_class,
+			ts.current_season,
+			ts.current_season
+			  )  :: scd_columns
+		]) AS changed_records
+	FROM
+		last_season ls
+	JOIN
+		this_season ts
+	ON
+		ls.player_name = ts.player_name
+	WHERE
+		ls.is_active <> ts.is_active
+		OR
+		ls.scoring_class <> ts.scoring_class
+	),
+	unnested_changed_records AS (
+	SELECT
+		player_name,
+		age,
+		height,
+		weight,
+		college,
+		country,
+		draft_year,
+		season_stats,
+		(changed_records :: scd_columns).is_active AS is_active,
+		(changed_records :: scd_columns).scoring_class AS scoring_class,
+		(changed_records :: scd_columns).start_season AS start_season,
+		(changed_records :: scd_columns).end_season AS end_season
+	FROM
+		changed_records
+	)
+	SELECT * FROM unnested_changed_records
+	
+	UNION ALL
+	
+	SELECT * FROM unchanged_records
+	
+	UNION ALL
+	
+	SELECT * FROM new_records
+	
+	UNION ALL
+	
+	SELECT * FROM historical_data
+);
+
+TRUNCATE TABLE players_scd;
+
+INSERT INTO players_scd(
+	SELECT * FROM temp_table
+);
+
+DROP TABLE temp_table;
+
+END;

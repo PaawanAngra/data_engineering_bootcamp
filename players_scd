@@ -1,0 +1,70 @@
+SELECT * FROM players ORDER BY player_name, current_season
+
+WITH with_change AS (
+SELECT 
+	player_name,
+	age,
+	height,
+	weight,
+	college,
+	country,
+	draft_year,
+	season_stats,
+	LAG(is_active) OVER(PARTITION BY player_name ORDER BY current_season) AS prev_is_active,
+	is_active,
+	LAG(scoring_class) OVER(PARTITION BY player_name ORDER BY current_season) AS prev_scoring_class,
+	scoring_class,
+	current_season
+FROM
+	players
+WHERE current_season < 2022
+),
+change_indicator AS (
+	SELECT *,
+		CASE WHEN prev_is_active IS NOT NULL AND prev_scoring_class IS NOT NULL
+				THEN CASE WHEN prev_is_active <> is_active OR prev_scoring_class <> scoring_class
+						THEN 1
+					 ELSE 0 END
+		 ELSE 0 END AS change_indicator
+	FROM with_change
+),
+with_streak AS (
+	SELECT *,
+		SUM(change_indicator) OVER(PARTITION BY player_name ORDER BY current_season) AS streak
+	FROM change_indicator
+)
+INSERT INTO players_scd (
+	SELECT DISTINCT ON (player_name, streak)
+		player_name,
+		age,
+		height,
+		weight,
+		college,
+		country,
+		draft_year,
+		season_stats,
+		is_active,
+		scoring_class,
+		MIN(current_season) OVER(PARTITION BY player_name, streak) AS start_season,
+		MAX(current_season) OVER(PARTITION BY player_name, streak) AS end_season
+	FROM 
+		with_streak
+	ORDER BY player_name, streak, CARDINALITY(season_stats) DESC
+)
+
+CREATE TABLE players_scd (
+	player_name text,
+	age integer,
+	height text,
+	weight integer,
+	college text,
+	country text,
+	draft_year text,
+	season_stats season_stats[],
+	is_active boolean,
+	scoring_class scoring_class,
+	start_season integer,
+	end_season integer
+)
+
+SELECT * FROM players_scd
