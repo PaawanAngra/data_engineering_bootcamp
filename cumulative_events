@@ -1,0 +1,157 @@
+SELECT * FROM events WHERE user_id = 15049317011116400000 AND event_time :: DATE = '2023-01-01'
+
+DROP TABLE IF EXISTS events_cumulative
+
+CREATE TABLE events_cumulative (
+id TEXT,
+url TEXT,
+dates DATE[],
+curr_date DATE,
+PRIMARY KEY (id, url, curr_date)
+)
+
+SELECT * FROM events_cumulative WHERE curr_date = '2023-01-31'
+
+DO $$
+DECLARE
+	d DATE := DATE '2023-01-01';
+	end_date DATE := DATE '2023-01-31';
+BEGIN
+	WHILE d <= end_date LOOP
+
+	RAISE NOTICE 'Processing date %', d;
+	
+	INSERT INTO events_cumulative(
+		WITH yesterday AS (
+			SELECT 
+				id,
+				url,
+				dates,
+				curr_date
+			FROM
+				events_cumulative
+			WHERE curr_date = d - INTERVAL '1 day'
+			AND id IS NOT NULL
+		),
+		today_ranked AS (
+			SELECT 
+				CAST(user_id AS TEXT) AS id,
+				url,
+				event_time :: DATE AS date,
+				event_time :: DATE AS curr_date,
+				ROW_NUMBER() OVER(PARTITION BY user_id, url ORDER BY event_time) AS row_num
+			FROM
+				events
+			WHERE event_time :: DATE = d
+			AND user_id IS NOT NULL
+		),
+		today AS (
+			SELECT 
+				id,
+				url,
+				date,
+				curr_date
+			FROM
+				today_ranked
+			WHERE
+				row_num = 1
+		),
+		merged AS (
+			SELECT
+				COALESCE(y.id, t.id) AS id,
+				COALESCE(y.url, t.url) AS url,
+				CASE 
+					WHEN 
+						y.dates IS NULL
+					THEN 
+						ARRAY[t.curr_date]
+					WHEN
+						t.curr_date IS NULL
+					THEN
+						y.dates
+					ELSE
+						y.dates || ARRAY[t.curr_date]
+					END AS dates,
+				COALESCE(t.curr_date, y.curr_date + INTERVAL '1 day')
+			FROM
+				yesterday y
+				FULL OUTER JOIN
+				today t
+				ON
+					y.id = t.id
+					AND y.url = t.url
+		)
+		SELECT * FROM merged
+	);
+
+	d := d + INTERVAL '1 day';
+	END LOOP;
+END $$;
+
+DROP TABLE IF EXISTS events_cumulative_bits
+
+CREATE TABLE events_cumulative_bits(
+	id TEXT,
+	url TEXT,
+	curr_date DATE,
+	date_list bit(32),
+	is_daily_active BOOLEAN,
+	is_weekly_active BOOLEAN,
+	is_monthly_active BOOLEAN,
+	PRIMARY KEY(id, url, curr_date)
+)
+
+INSERT INTO events_cumulative_bits(
+	WITH series AS (
+			SELECT 
+				CAST(series AS DATE) AS dates_check 
+			FROM GENERATE_SERIES('2023-01-01' :: DATE , '2023-01-31' :: DATE, INTERVAL '1 DAY') AS series
+		),
+		data AS (
+			SELECT
+				*
+			FROM 
+				events_cumulative
+		),
+		data_placeholder_int AS (
+			SELECT 
+				id,
+				url,
+				dates,
+				curr_date,
+				SUM(
+					CASE 
+						WHEN 
+							dates_check = ANY(dates) 
+						THEN 
+							CAST(2 ^ CAST((dates_check - '2023-01-01' :: DATE) AS INT) AS BIGINT)
+						ELSE 
+							0 :: BIGINT
+					END
+				) AS date_list
+			FROM 
+				data
+				CROSS JOIN
+				series
+			GROUP BY
+				id, url, dates, curr_date
+		),
+		data_bits AS (
+			SELECT
+			id,
+			url,
+			curr_date,
+			CAST(CAST(date_list AS BIGINT) AS BIT(32)) AS bit_list
+		FROM
+			data_placeholder_int
+		)
+		SELECT 
+			*,
+			CASE WHEN (bit_list & '00000000000000000000000000000001' :: bit(32)) :: INT > 0 THEN TRUE ELSE FALSE END AS is_daily_active,
+			CASE WHEN (bit_list & '00000000000000000000000001111111' :: bit(32)) :: INT > 0 THEN TRUE ELSE FALSE END AS is_weekly_active,
+			CASE WHEN (bit_list & '11111111111111111111111111111111' :: bit(32)) :: INT > 0 THEN TRUE ELSE FALSE END AS is_monthly_active
+		FROM 
+			data_bits
+);
+
+SELECT * FROM events_cumulative_bits
