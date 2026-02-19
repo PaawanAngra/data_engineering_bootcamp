@@ -1,0 +1,89 @@
+DROP TABLE events_array
+
+CREATE TABLE events_array (
+	user_id NUMERIC,
+	month_start DATE,
+	events INTEGER[],
+	PRIMARY KEY(user_id, month_start)
+)
+
+INSERT INTO events_array(
+	WITH today AS (
+		SELECT
+			user_id,
+			event_time :: DATE AS event_time,
+			COUNT(1) AS events
+		FROM
+			events
+		WHERE 
+			event_time :: DATE = '2023-01-03'
+			AND user_id IS NOT NULL
+		GROUP BY
+			user_id, event_time :: DATE
+	),
+	yesterday AS (
+		SELECT
+			*
+		FROM
+			events_array
+		WHERE
+			month_start = '2023-01-01'
+	)
+	SELECT
+		COALESCE(y.user_id, t.user_id) AS user_id,
+		COALESCE(y.month_start, DATE_TRUNC('month', t.event_time) :: DATE) AS month_start,
+		CASE
+			WHEN
+				t.user_id IS NULL
+			THEN
+				y.events || ARRAY[0]
+			WHEN
+				y.user_id IS NULL
+			THEN
+				ARRAY_FILL(0, ARRAY[t.event_time :: DATE - '2023-01-01' :: DATE]) || ARRAY[t.events]
+			ELSE
+				y.events || ARRAY[t.events]
+		END AS events
+	FROM
+		yesterday y
+			FULL OUTER JOIN
+		today t
+			ON y.user_id = t.user_id
+)
+ON CONFLICT (user_id, month_start) DO UPDATE set events = EXCLUDED.events		
+
+SELECT
+    month_start,
+    month_start + (idx - 1) :: INT AS event_date,
+    val
+FROM (
+    SELECT
+        month_start,
+        ARRAY[
+            SUM(events[1]),
+            SUM(events[2]),
+            SUM(events[3])
+        ] AS arr
+    FROM events_array
+    GROUP BY month_start
+) t
+CROSS JOIN LATERAL UNNEST(arr) WITH ORDINALITY AS u(val, idx);
+
+WITH aggregated AS (
+	SELECT
+        month_start,
+        ARRAY[
+            SUM(events[1]),
+            SUM(events[2]),
+            SUM(events[3])
+        ] AS arr
+    FROM events_array
+	GROUP BY month_start
+)
+SELECT
+    month_start,
+	month_start + (idx - 1) :: int AS date,
+	val AS event_count
+FROM 
+	aggregated
+	CROSS JOIN LATERAL UNNEST(arr) WITH ORDINALITY AS u(val, idx)
